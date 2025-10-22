@@ -233,13 +233,6 @@ class MediumContrastiveEncoder(nn.Module):
             nn.Linear(792, 2048),
             nn.ReLU(),
             nn.Dropout(dropout),
-            # nn.Linear(hidden_dim2, hidden_dim3),
-            # nn.ReLU(),
-            # nn.Dropout(dropout),
-            # nn.Linear(hidden_dim3, hidden_dim4),
-            # nn.ReLU(),
-            # nn.Dropout(dropout),
-            # nn.Linear(hidden_dim4, 512),
             nn.Linear(2048, input_dim),
         )
 

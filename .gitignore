@@ -1,5 +1,6 @@
 datasets/*
 !datasets/.gitkeep
+!datasets/HC3_zh/
 
 checkpoints/*
 !checkpoints/.gitkeep
