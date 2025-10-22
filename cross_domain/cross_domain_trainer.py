@@ -39,8 +39,8 @@ JSONL_PATH = '../datasets/HC3_zh/all.jsonl'  # 改为你的 jsonl 路径
 CHECKPOINT_DIR = '../checkpoints'
 
 # 训练/评估来源可配
-ALL_SOURCES = ["open_qa", "baike", "nlpcc_dbpa", "medicine", "finance", "psychology", "law"]
-train_sources: List[str] = ["open_qa", "baike", "nlpcc_dbpa", "medicine", "finance", "psychology"]              # 参与训练的 source 子集
+ALL_SOURCES = ["open_qa", "baike", "nlpcc_dbqa", "medicine", "finance", "psychology", "law"]
+train_sources: List[str] = ["open_qa", "baike", "nlpcc_dbqa", "medicine", "finance", "psychology"]              # 参与训练的 source 子集
 eval_sources:  List[str] = ["law"]  # 参与测试的 source 子集
 
 PER_SOURCE_LIMIT = 500  # 每个 source 选前 K 条
@@ -74,7 +74,7 @@ def get_tokenizer(model_name_or_path: str,
 DOMAIN_MAP = {
     "open_qa": 0,
     "baike": 1,
-    "nlpcc_dbpa": 2,
+    "nlpcc_dbqa": 2,
     "medicine": 3,
     "finance": 4,
     "psychology": 5,
@@ -90,7 +90,10 @@ def _to_list(val):
     return [str(val)]
 
 def _clean(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
     return s.replace('\r', ' ').replace('\n', ' ').strip()
+
 
 def build_triplets_from_jsonl(
     jsonl_path: str,
@@ -239,6 +242,9 @@ def get_logits_pair(encodings: BatchEncoding,
                     performer_model,
                     observer_device: Union[str, torch.device],
                     performer_device: Union[str, torch.device]) -> (torch.Tensor, torch.Tensor):
+    if isinstance(encodings, dict):
+        encodings = BatchEncoding(encodings)
+    
     ids_cpu  = encodings.input_ids.cpu()
     mask_cpu = encodings.attention_mask.cpu()
 
