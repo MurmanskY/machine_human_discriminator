@@ -1,6 +1,6 @@
 '''
 将分步的代码进行整合，直接在a100服务器上进行训练
-
+次代码为初步代码
 '''
 from typing import Union, List, Dict, Tuple
 import os
