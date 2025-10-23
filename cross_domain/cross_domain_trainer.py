@@ -1,18 +1,7 @@
+'''
+将分步的代码进行整合，直接在a100服务器上进行训练
 
-# -*- coding: utf-8 -*-
-"""
-合并改版：JSONL 数据 + 可选 source 训练/测试 + 一次性前向，无中间落盘
-- 输入：单个 JSONL（每行含 question、human_answers、chatgpt_answers、source）
-- 每个 source 取前 K 条（默认 500）
-- 三元组定义：
-    anchor = question
-    pos    = 当前条的第一条 human_answers（或可切换为“剩余样本随机 human”）
-    neg    = 当前条的第一条 chatgpt_answers
-- 训练/测试来源可配置：train_sources / eval_sources
-- 保持原 trainer.py 的损失与大多数超参；num_domains 根据选中来源自动确定
-- 仍使用 Qwen/Qwen-7B 与 Qwen/Qwen-7B-Chat
-"""
-
+'''
 from typing import Union, List, Dict, Tuple
 import os
 import json
@@ -40,7 +29,7 @@ CHECKPOINT_DIR = '../checkpoints'
 
 # 训练/评估来源可配
 ALL_SOURCES = ["open_qa", "baike", "nlpcc_dbqa", "medicine", "finance", "psychology", "law"]
-train_sources: List[str] = ["open_qa", "baike", "nlpcc_dbqa", "medicine", "finance", "psychology"]              # 参与训练的 source 子集
+train_sources: List[str] = ["open_qa", "baike", "nlpcc_dbqa", "medicine", "finance", "psychology"]  # 参与训练的 source 子集
 eval_sources:  List[str] = ["law"]  # 参与测试的 source 子集
 
 PER_SOURCE_LIMIT = 500  # 每个 source 选前 K 条
@@ -94,7 +83,6 @@ def _clean(s: str) -> str:
         return ""
     return s.replace('\r', ' ').replace('\n', ' ').strip()
 
-
 def build_triplets_from_jsonl(
     jsonl_path: str,
     sources: List[str],
@@ -126,8 +114,8 @@ def build_triplets_from_jsonl(
             if not q:
                 continue
 
-            humans = [ _clean(x) for x in _to_list(obj.get("human_answers")) if str(x).strip() ]
-            gpts   = [ _clean(x) for x in _to_list(obj.get("chatgpt_answers")) if str(x).strip() ]
+            humans = [_clean(x) for x in _to_list(obj.get("human_answers")) if str(x).strip()]
+            gpts   = [_clean(x) for x in _to_list(obj.get("chatgpt_answers")) if str(x).strip()]
 
             if not humans or not gpts:
                 continue
@@ -177,7 +165,7 @@ def build_triplets_from_jsonl(
 # ---------------------------
 class TokenizedTripletDataset(Dataset):
     """
-    读取三元组：anchor/positive/abstract，并包含 domain_label。
+    读取三元组：anchor/positive/negative，并包含 domain_label。
     """
     def __init__(self,
                  anchors: List[str],
@@ -241,10 +229,9 @@ def get_logits_pair(encodings: BatchEncoding,
                     observer_model,
                     performer_model,
                     observer_device: Union[str, torch.device],
-                    performer_device: Union[str, torch.device]) -> (torch.Tensor, torch.Tensor):
+                    performer_device: Union[str, torch.device]) -> Tuple[torch.Tensor, torch.Tensor]:
     if isinstance(encodings, dict):
         encodings = BatchEncoding(encodings)
-    
     ids_cpu  = encodings.input_ids.cpu()
     mask_cpu = encodings.attention_mask.cpu()
 
@@ -257,36 +244,22 @@ def get_logits_pair(encodings: BatchEncoding,
         'attention_mask': mask_cpu.to(performer_device)
     })
 
-    obs_logits   = observer_model(**enc_obs).logits
-    perf_logits  = performer_model(**enc_perf).logits
+    obs_logits  = observer_model(**enc_obs).logits
+    perf_logits = performer_model(**enc_perf).logits
     return obs_logits, perf_logits
 
 
+@torch.inference_mode()
 def compute_full_logits(dataset: TokenizedTripletDataset,
                         observer_model,
                         performer_model,
                         observer_device,
-                        performer_device) -> Dict[str, torch.Tensor]:
-    anchor_enc   = dataset._tokenize(dataset.anchor_texts)
-    positive_enc = dataset._tokenize(dataset.positive_texts)
-    negative_enc = dataset._tokenize(dataset.negative_texts)
-
-    a_obs, a_perf = get_logits_pair(anchor_enc,   observer_model, performer_model, observer_device, performer_device)
-    p_obs, p_perf = get_logits_pair(positive_enc, observer_model, performer_model, observer_device, performer_device)
-    n_obs, n_perf = get_logits_pair(negative_enc, observer_model, performer_model, observer_device, performer_device)
-
-    logits_all = {
-        'anchor_observer_logits':   a_obs.cpu(),
-        'anchor_performer_logits':  a_perf.cpu(),
-        'positive_observer_logits': p_obs.cpu(),
-        'positive_performer_logits':p_perf.cpu(),
-        'negative_observer_logits': n_obs.cpu(),
-        'negative_performer_logits':n_perf.cpu(),
-    }
-    del a_obs, a_perf, p_obs, p_perf, n_obs, n_perf, anchor_enc, positive_enc, negative_enc
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return logits_all
+                        performer_device,
+                        batch_size: int = 1) -> Dict[str, torch.Tensor]:
+    """
+    已移除：不再批量预计算所有样本的logits以节省内存。
+    """
+    raise NotImplementedError("Full logits precomputation removed in online computation update.")
 
 
 # ---------------------------
@@ -343,7 +316,6 @@ def entropy(p_logits: torch.Tensor,
         ce = ce * mask
         return ce.sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
 
-
 # ---------------------------
 # GRL + Domain Classifier（沿用 trainer.py）
 # ---------------------------
@@ -398,7 +370,7 @@ class SharedEncoderAdapter(nn.Module):
 
     def forward(self, x):
         B, T, V = x.shape
-        x_flat   = x.view(B*T, V)
+        x_flat   = x.view(B * T, V)
         out_flat = self.network(x_flat)
         return out_flat.view(B, T, V), None
 
@@ -407,7 +379,7 @@ class SharedEncoderAdapter(nn.Module):
 # 主流程
 # ---------------------------
 if __name__ == "__main__":
-    # 训练配置（尽量保持不变；num_domains 根据来源动态设定）
+    # 训练配置
     epochs = 3
     freeze_epochs = 1
     accumulation_steps = 40
@@ -423,10 +395,10 @@ if __name__ == "__main__":
         JSONL_PATH, train_sources, PER_SOURCE_LIMIT, USE_RANDOM_POS_INSTEAD
     )
     ev_anchors, ev_poss, ev_negs, ev_domains = build_triplets_from_jsonl(
-        JSONL_PATH, eval_sources,  PER_SOURCE_LIMIT, USE_RANDOM_POS_INSTEAD
+        JSONL_PATH, eval_sources, PER_SOURCE_LIMIT, USE_RANDOM_POS_INSTEAD
     )
 
-    # num_domains 动态
+    # 动态确定 num_domains
     used_domains = sorted({d for d in tr_domains + ev_domains})
     num_domains = max(used_domains) + 1 if used_domains else 1
 
@@ -434,11 +406,11 @@ if __name__ == "__main__":
     base_model_name = "Qwen/Qwen-7B"
     train_set = TokenizedTripletDataset(
         anchors=tr_anchors, positives=tr_poss, negatives=tr_negs, domain_labels=tr_domains,
-        model_name_or_path=base_model_name, device=train_device
+        model_name_or_path=base_model_name, device=None  # 分词结果先放CPU，按需再搬运
     )
     eval_set = TokenizedTripletDataset(
         anchors=ev_anchors, positives=ev_poss, negatives=ev_negs, domain_labels=ev_domains,
-        model_name_or_path=base_model_name, device=train_device
+        model_name_or_path=base_model_name, device=None
     )
     N = len(train_set)
     N_eval = len(eval_set)
@@ -464,57 +436,31 @@ if __name__ == "__main__":
     )
     observer_model.eval()
     performer_model.eval()
-    for p in observer_model.parameters():  p.requires_grad = False
-    for p in performer_model.parameters(): p.requires_grad = False
-
-    # 一次性前向 logits（训练集）
-    print(f"Computing train logits for {N} samples ...")
-    train_logits = compute_full_logits(
-        dataset=train_set,
-        observer_model=observer_model,
-        performer_model=performer_model,
-        observer_device=observer_device,
-        performer_device=performer_device
-    )
-
-    # 一次性前向 logits（评估集）
-    if N_eval > 0:
-        print(f"Computing eval logits for {N_eval} samples ...")
-        eval_logits = compute_full_logits(
-            dataset=eval_set,
-            observer_model=observer_model,
-            performer_model=performer_model,
-            observer_device=observer_device,
-            performer_device=performer_device
-        )
-    else:
-        eval_logits = None
-
-    # 释放 Qwen 模型显存
-    del observer_model, performer_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    for p in observer_model.parameters():
+        p.requires_grad = False
+    for p in performer_model.parameters():
+        p.requires_grad = False
 
     # 构建可训练模块
     encoder = SharedEncoderAdapter().to(train_device)
-    if os.path.exists(os.path.join(CHECKPOINT_DIR, "medium_contrastive_encoder.pth")):
-        encoder.load_state_dict(torch.load(os.path.join(CHECKPOINT_DIR, "medium_contrastive_encoder.pth"), map_location=train_device))
+    # 如有已训练的 encoder 权重则加载
+    encoder_ckpt_path = os.path.join(CHECKPOINT_DIR, "medium_contrastive_encoder.pth")
+    if os.path.exists(encoder_ckpt_path):
+        encoder.load_state_dict(torch.load(encoder_ckpt_path, map_location=train_device))
 
     domain_classifier = DomainClassifier(num_domains=num_domains).to(train_device)
     grl = GRL()
 
     optimizer_domain = torch.optim.Adam(domain_classifier.parameters(), lr=5e-6)
     optimizer_adv = torch.optim.Adam([
-        {'params': encoder.parameters(),          'lr': 1e-6},
-        {'params': domain_classifier.parameters(),'lr': 5e-6},
+        {'params': encoder.parameters(),           'lr': 1e-6},
+        {'params': domain_classifier.parameters(), 'lr': 5e-6},
     ])
     scaler = GradScaler()
 
-    triplet_criterion = torch.nn.TripletMarginLoss(margin=0.3)
-    domain_criterion  = torch.nn.CrossEntropyLoss()
+    triplet_criterion = nn.TripletMarginLoss(margin=0.3)
+    domain_criterion  = nn.CrossEntropyLoss()
 
-    # 训练循环
-    epochs = epochs
     total_steps = N * epochs
     g = torch.Generator().manual_seed(SEED)
     sample_num = 0
@@ -522,7 +468,9 @@ if __name__ == "__main__":
     tokenizer = train_set.tokenizer
     pad_id = 151643 if tokenizer.pad_token_id is None else tokenizer.pad_token_id
 
+    # 开始训练循环，逐样本在线计算logits
     for epoch in range(epochs):
+        print("start training", epoch)
         perm = torch.randperm(N, generator=g).tolist()
 
         if epoch < freeze_epochs:
@@ -533,81 +481,110 @@ if __name__ == "__main__":
 
         for i in perm:
             raw_i = train_set[i]
-            anchor_inputs = BatchEncoding({
-                'input_ids':      raw_i['anchor_input_ids'].unsqueeze(0),
-                'attention_mask': raw_i['anchor_attention_mask'].unsqueeze(0),
-            })
-            positive_inputs = BatchEncoding({
-                'input_ids':      raw_i['positive_input_ids'].unsqueeze(0),
-                'attention_mask': raw_i['positive_attention_mask'].unsqueeze(0),
-            })
-            negative_inputs = BatchEncoding({
-                'input_ids':      raw_i['negative_input_ids'].unsqueeze(0),
-                'attention_mask': raw_i['negative_attention_mask'].unsqueeze(0),
-            })
-            domain_label = raw_i['domain_label'].unsqueeze(0).to(train_device)   # [1]
+            # 将当前三元组的 token ids 和 attention mask 取出 (在CPU上)
+            anchor_ids = raw_i['anchor_input_ids'].unsqueeze(0).cpu()
+            anchor_mask = raw_i['anchor_attention_mask'].unsqueeze(0).cpu()
+            pos_ids = raw_i['positive_input_ids'].unsqueeze(0).cpu()
+            pos_mask = raw_i['positive_attention_mask'].unsqueeze(0).cpu()
+            neg_ids = raw_i['negative_input_ids'].unsqueeze(0).cpu()
+            neg_mask = raw_i['negative_attention_mask'].unsqueeze(0).cpu()
+            domain_label = raw_i['domain_label'].unsqueeze(0).to(train_device)  # [1]
 
-            a_obs = train_logits['anchor_observer_logits'][i:i+1].to(train_device)
-            a_perf= train_logits['anchor_performer_logits'][i:i+1].to(train_device)
-            p_obs = train_logits['positive_observer_logits'][i:i+1].to(train_device)
-            p_perf= train_logits['positive_performer_logits'][i:i+1].to(train_device)
-            n_obs = train_logits['negative_observer_logits'][i:i+1].to(train_device)
-            n_perf= train_logits['negative_performer_logits'][i:i+1].to(train_device)
+            # 将三个序列拼接，分别发送到 observer_device 和 performer_device 计算logits
+            combined_ids = torch.cat([anchor_ids, pos_ids, neg_ids], dim=0)
+            combined_mask = torch.cat([anchor_mask, pos_mask, neg_mask], dim=0)
+            # 发送到各模型所在设备并计算logits
+            with torch.no_grad():
+                # Observer 模型 logits
+                obs_input_ids = combined_ids.to(observer_device)
+                obs_attention_mask = combined_mask.to(observer_device)
+                obs_logits_all = observer_model(input_ids=obs_input_ids, attention_mask=obs_attention_mask).logits
+                # Performer 模型 logits
+                perf_input_ids = combined_ids.to(performer_device)
+                perf_attention_mask = combined_mask.to(performer_device)
+                perf_logits_all = performer_model(input_ids=perf_input_ids, attention_mask=perf_attention_mask).logits
+
+            # 将logits移动到训练设备，并转换为 float32 以供编码器处理
+            obs_logits_all = obs_logits_all.to(device=train_device, dtype=torch.float32)
+            perf_logits_all = perf_logits_all.to(device=train_device, dtype=torch.float32)
+
+            # 拆分出 anchor/positive/negative 的 observer 和 performer logits
+            a_obs = obs_logits_all[0:1]   # shape [1, T, V]
+            p_obs = obs_logits_all[1:2]
+            n_obs = obs_logits_all[2:3]
+            a_perf = perf_logits_all[0:1]
+            p_perf = perf_logits_all[1:2]
+            n_perf = perf_logits_all[2:3]
 
             p_prog = sample_num / max(total_steps, 1)
             if epoch < freeze_epochs:
                 lambda_adv = 0.0
             else:
+                # 根据进度调整 lambda_adv，实现从0逐渐升至1的权重
                 lambda_adv = float(2. / (1. + np.exp(-gamma * p_prog)) - 1.0)
 
             ctx = autocast(device_type='cuda', dtype=torch.float16) if train_device.type == 'cuda' else nullcontext()
             with ctx:
+                # 前向传播通过编码器（对每个 logits 分别编码）
                 a_obs_out, _ = encoder(a_obs)
-                a_perf_out,_ = encoder(a_perf)
-
+                a_perf_out, _ = encoder(a_perf)
                 p_obs_out, _ = encoder(p_obs)
-                p_perf_out,_ = encoder(p_perf)
-
+                p_perf_out, _ = encoder(p_perf)
                 n_obs_out, _ = encoder(n_obs)
-                n_perf_out,_ = encoder(n_perf)
+                n_perf_out, _ = encoder(n_perf)
 
-                a_ppl   = perplexity(anchor_inputs,  a_perf_out)
-                a_xppl  = entropy(   a_obs_out, a_perf_out, anchor_inputs,  pad_id)
+                # 计算 perplexity 和 cross-perplexity
+                anchor_inputs = BatchEncoding({
+                    'input_ids':      anchor_ids.to(train_device),
+                    'attention_mask': anchor_mask.to(train_device),
+                })
+                positive_inputs = BatchEncoding({
+                    'input_ids':      pos_ids.to(train_device),
+                    'attention_mask': pos_mask.to(train_device),
+                })
+                negative_inputs = BatchEncoding({
+                    'input_ids':      neg_ids.to(train_device),
+                    'attention_mask': neg_mask.to(train_device),
+                })
+                a_ppl  = perplexity(anchor_inputs, a_perf_out)
+                a_xppl = entropy(a_obs_out, a_perf_out, anchor_inputs, pad_id)
+                p_ppl  = perplexity(positive_inputs, p_perf_out)
+                p_xppl = entropy(p_obs_out, p_perf_out, positive_inputs, pad_id)
+                n_ppl  = perplexity(negative_inputs, n_perf_out)
+                n_xppl = entropy(n_obs_out, n_perf_out, negative_inputs, pad_id)
 
-                p_ppl   = perplexity(positive_inputs, p_perf_out)
-                p_xppl  = entropy(   p_obs_out, p_perf_out, positive_inputs, pad_id)
-
-                n_ppl   = perplexity(negative_inputs, n_perf_out)
-                n_xppl  = entropy(   n_obs_out, n_perf_out, negative_inputs, pad_id)
-
+                # Triplet 损失（使用 ppl/xppl 比值）
                 triplet_loss = triplet_criterion(
                     a_ppl / a_xppl,
                     p_ppl / p_xppl,
                     n_ppl / n_xppl
                 )
 
+                # 域分类输入为三个比值拼接
                 domain_input = torch.cat([
                     (a_ppl / a_xppl).unsqueeze(-1),
                     (p_ppl / p_xppl).unsqueeze(-1),
                     (n_ppl / n_xppl).unsqueeze(-1),
-                ], dim=-1)
+                ], dim=-1).to(train_device)
 
+                # 域分类损失，前 freeze_epochs 不反转梯度
                 if epoch < freeze_epochs:
                     domain_logits = domain_classifier(domain_input)
                 else:
-                    domain_logits = domain_classifier(GRL().forward(domain_input, lambda_adv))
-
+                    domain_logits = domain_classifier(grl(domain_input, lambda_adv))
                 domain_loss = domain_criterion(domain_logits, domain_label)
 
+                # 累积损失
                 total_loss = (domain_loss if epoch < freeze_epochs else (triplet_loss + domain_loss)) / accumulation_steps
 
+            # 反向传播与梯度累积
             sample_num += 1
             if train_device.type == 'cuda':
                 scaler.scale(total_loss).backward()
             else:
                 total_loss.backward()
 
-            if (sample_num % accumulation_steps == 0):
+            if sample_num % accumulation_steps == 0:
                 if train_device.type == 'cuda':
                     scaler.step(current_optimizer)
                     scaler.update()
@@ -615,64 +592,86 @@ if __name__ == "__main__":
                     current_optimizer.step()
                 current_optimizer.zero_grad()
 
-            if sample_num % accumulation_steps == 0:
+                # 打印当前 step 的损失信息
                 tl = float(triplet_loss.detach().cpu())
                 dl = float(domain_loss.detach().cpu())
                 print(f"[Epoch {epoch}] Step {sample_num} | Triplet: {tl:.4f} | Domain: {dl:.4f} | Total: {float((triplet_loss+domain_loss).detach().cpu()):.4f}")
 
-    # 简单评估（可选）
+    # 评估（逐样本计算logits）
     if N_eval > 0:
         encoder.eval()
+        domain_classifier.eval()
         with torch.no_grad():
             triplet_losses = []
             dom_correct, dom_total = 0, 0
             for i in range(N_eval):
                 raw_i = eval_set[i]
-                anchor_inputs = BatchEncoding({
-                    'input_ids':      raw_i['anchor_input_ids'].unsqueeze(0),
-                    'attention_mask': raw_i['anchor_attention_mask'].unsqueeze(0),
-                })
-                positive_inputs = BatchEncoding({
-                    'input_ids':      raw_i['positive_input_ids'].unsqueeze(0),
-                    'attention_mask': raw_i['positive_attention_mask'].unsqueeze(0),
-                })
-                negative_inputs = BatchEncoding({
-                    'input_ids':      raw_i['negative_input_ids'].unsqueeze(0),
-                    'attention_mask': raw_i['negative_attention_mask'].unsqueeze(0),
-                })
+                anchor_ids = raw_i['anchor_input_ids'].unsqueeze(0).cpu()
+                anchor_mask = raw_i['anchor_attention_mask'].unsqueeze(0).cpu()
+                pos_ids = raw_i['positive_input_ids'].unsqueeze(0).cpu()
+                pos_mask = raw_i['positive_attention_mask'].unsqueeze(0).cpu()
+                neg_ids = raw_i['negative_input_ids'].unsqueeze(0).cpu()
+                neg_mask = raw_i['negative_attention_mask'].unsqueeze(0).cpu()
                 domain_label = raw_i['domain_label'].unsqueeze(0).to(train_device)
 
-                a_obs = eval_logits['anchor_observer_logits'][i:i+1].to(train_device)
-                a_perf= eval_logits['anchor_performer_logits'][i:i+1].to(train_device)
-                p_obs = eval_logits['positive_observer_logits'][i:i+1].to(train_device)
-                p_perf= eval_logits['positive_performer_logits'][i:i+1].to(train_device)
-                n_obs = eval_logits['negative_observer_logits'][i:i+1].to(train_device)
-                n_perf= eval_logits['negative_performer_logits'][i:i+1].to(train_device)
+                combined_ids = torch.cat([anchor_ids, pos_ids, neg_ids], dim=0)
+                combined_mask = torch.cat([anchor_mask, pos_mask, neg_mask], dim=0)
+                # 计算obs/perf logits
+                obs_input_ids = combined_ids.to(observer_device)
+                obs_attention_mask = combined_mask.to(observer_device)
+                perf_input_ids = combined_ids.to(performer_device)
+                perf_attention_mask = combined_mask.to(performer_device)
+                obs_logits_all = observer_model(input_ids=obs_input_ids, attention_mask=obs_attention_mask).logits
+                perf_logits_all = performer_model(input_ids=perf_input_ids, attention_mask=perf_attention_mask).logits
+                # 转移到训练设备并转换精度
+                obs_logits_all = obs_logits_all.to(device=train_device, dtype=torch.float32)
+                perf_logits_all = perf_logits_all.to(device=train_device, dtype=torch.float32)
 
+                a_obs = obs_logits_all[0:1];  a_perf = perf_logits_all[0:1]
+                p_obs = obs_logits_all[1:2];  p_perf = perf_logits_all[1:2]
+                n_obs = obs_logits_all[2:3];  n_perf = perf_logits_all[2:3]
+
+                # 通过编码器
                 a_obs_out, _ = encoder(a_obs)
-                a_perf_out,_ = encoder(a_perf)
+                a_perf_out, _ = encoder(a_perf)
                 p_obs_out, _ = encoder(p_obs)
-                p_perf_out,_ = encoder(p_perf)
+                p_perf_out, _ = encoder(p_perf)
                 n_obs_out, _ = encoder(n_obs)
-                n_perf_out,_ = encoder(n_perf)
+                n_perf_out, _ = encoder(n_perf)
 
-                a_ppl   = perplexity(anchor_inputs,  a_perf_out)
-                a_xppl  = entropy(   a_obs_out, a_perf_out, anchor_inputs,  pad_id)
-                p_ppl   = perplexity(positive_inputs, p_perf_out)
-                p_xppl  = entropy(   p_obs_out, p_perf_out, positive_inputs, pad_id)
-                n_ppl   = perplexity(negative_inputs, n_perf_out)
-                n_xppl  = entropy(   n_obs_out, n_perf_out, negative_inputs, pad_id)
+                # 计算 ppl 和 xppl
+                anchor_inputs = BatchEncoding({
+                    'input_ids': anchor_ids.to(train_device),
+                    'attention_mask': anchor_mask.to(train_device),
+                })
+                positive_inputs = BatchEncoding({
+                    'input_ids': pos_ids.to(train_device),
+                    'attention_mask': pos_mask.to(train_device),
+                })
+                negative_inputs = BatchEncoding({
+                    'input_ids': neg_ids.to(train_device),
+                    'attention_mask': neg_mask.to(train_device),
+                })
+                a_ppl  = perplexity(anchor_inputs, a_perf_out)
+                a_xppl = entropy(a_obs_out, a_perf_out, anchor_inputs, pad_id)
+                p_ppl  = perplexity(positive_inputs, p_perf_out)
+                p_xppl = entropy(p_obs_out, p_perf_out, positive_inputs, pad_id)
+                n_ppl  = perplexity(negative_inputs, n_perf_out)
+                n_xppl = entropy(n_obs_out, n_perf_out, negative_inputs, pad_id)
 
+                # Triplet 损失（单样本）
                 tl = F.triplet_margin_loss(
-                    a_ppl / a_xppl, p_ppl / p_xppl, n_ppl / n_xppl, margin=0.3, reduction='none'
+                    a_ppl / a_xppl, p_ppl / p_xppl, n_ppl / n_xppl,
+                    margin=0.3, reduction='none'
                 )
-                triplet_losses.append(tl.mean().item())
+                triplet_losses.append(tl.item())
 
+                # 域分类准确率
                 domain_input = torch.cat([
                     (a_ppl / a_xppl).unsqueeze(-1),
                     (p_ppl / p_xppl).unsqueeze(-1),
                     (n_ppl / n_xppl).unsqueeze(-1),
-                ], dim=-1)
+                ], dim=-1).to(train_device)
                 logits = domain_classifier(domain_input)
                 pred = logits.argmax(dim=-1)
                 dom_correct += int((pred == domain_label).sum().item())
@@ -680,7 +679,7 @@ if __name__ == "__main__":
 
         print(f"[Eval] TripletLoss: {np.mean(triplet_losses):.4f} | Domain Acc: {dom_correct / max(dom_total,1):.4f}")
 
-    # 保存
+    # 保存最终模型
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     torch.save(encoder.state_dict(), os.path.join(CHECKPOINT_DIR, "shared_encoder_adapter_jsonl.pth"))
     torch.save(domain_classifier.state_dict(), os.path.join(CHECKPOINT_DIR, "domain_classifier_jsonl.pth"))
