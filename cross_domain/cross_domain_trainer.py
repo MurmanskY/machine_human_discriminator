@@ -1,7 +1,3 @@
-'''
-将分步的代码进行整合，直接在a100服务器上进行训练
-次代码为初步代码
-'''
 from typing import Union, List, Dict, Tuple
 import os
 import json
@@ -15,6 +11,7 @@ from torch.utils.data import Dataset
 from torch.amp import GradScaler, autocast
 from transformers import AutoTokenizer, AutoModelForCausalLM, BatchEncoding
 from contextlib import nullcontext
+import math
 
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
@@ -598,52 +595,43 @@ if __name__ == "__main__":
                 print(f"[Epoch {epoch}] Step {sample_num} | Triplet: {tl:.4f} | Domain: {dl:.4f} | Total: {float((triplet_loss+domain_loss).detach().cpu()):.4f}")
 
     # 评估（逐样本计算logits）
-    if N_eval > 0:
+    # ---------------------------
+    # 在训练结束后查找最佳阈值
+    # ---------------------------
+    if N > 0:
         encoder.eval()
-        domain_classifier.eval()
         with torch.no_grad():
-            triplet_losses = []
-            dom_correct, dom_total = 0, 0
-            for i in range(N_eval):
-                raw_i = eval_set[i]
-                anchor_ids = raw_i['anchor_input_ids'].unsqueeze(0).cpu()
-                anchor_mask = raw_i['anchor_attention_mask'].unsqueeze(0).cpu()
+            all_scores = []
+            all_labels = []
+            for i in range(N):
+                raw_i = train_set[i]
+                # 取出 positive 和 negative 的 token 序列
                 pos_ids = raw_i['positive_input_ids'].unsqueeze(0).cpu()
                 pos_mask = raw_i['positive_attention_mask'].unsqueeze(0).cpu()
                 neg_ids = raw_i['negative_input_ids'].unsqueeze(0).cpu()
                 neg_mask = raw_i['negative_attention_mask'].unsqueeze(0).cpu()
-                domain_label = raw_i['domain_label'].unsqueeze(0).to(train_device)
-
-                combined_ids = torch.cat([anchor_ids, pos_ids, neg_ids], dim=0)
-                combined_mask = torch.cat([anchor_mask, pos_mask, neg_mask], dim=0)
-                # 计算obs/perf logits
+                # 拼接正、负样本一起计算
+                combined_ids = torch.cat([pos_ids, neg_ids], dim=0)
+                combined_mask = torch.cat([pos_mask, neg_mask], dim=0)
                 obs_input_ids = combined_ids.to(observer_device)
                 obs_attention_mask = combined_mask.to(observer_device)
                 perf_input_ids = combined_ids.to(performer_device)
                 perf_attention_mask = combined_mask.to(performer_device)
                 obs_logits_all = observer_model(input_ids=obs_input_ids, attention_mask=obs_attention_mask).logits
                 perf_logits_all = performer_model(input_ids=perf_input_ids, attention_mask=perf_attention_mask).logits
-                # 转移到训练设备并转换精度
                 obs_logits_all = obs_logits_all.to(device=train_device, dtype=torch.float32)
                 perf_logits_all = perf_logits_all.to(device=train_device, dtype=torch.float32)
-
-                a_obs = obs_logits_all[0:1];  a_perf = perf_logits_all[0:1]
-                p_obs = obs_logits_all[1:2];  p_perf = perf_logits_all[1:2]
-                n_obs = obs_logits_all[2:3];  n_perf = perf_logits_all[2:3]
-
-                # 通过编码器
-                a_obs_out, _ = encoder(a_obs)
-                a_perf_out, _ = encoder(a_perf)
+                # 分割出 positive 和 negative 的 logits
+                p_obs = obs_logits_all[0:1]
+                n_obs = obs_logits_all[1:2]
+                p_perf = perf_logits_all[0:1]
+                n_perf = perf_logits_all[1:2]
+                # 编码
                 p_obs_out, _ = encoder(p_obs)
                 p_perf_out, _ = encoder(p_perf)
                 n_obs_out, _ = encoder(n_obs)
                 n_perf_out, _ = encoder(n_perf)
-
                 # 计算 ppl 和 xppl
-                anchor_inputs = BatchEncoding({
-                    'input_ids': anchor_ids.to(train_device),
-                    'attention_mask': anchor_mask.to(train_device),
-                })
                 positive_inputs = BatchEncoding({
                     'input_ids': pos_ids.to(train_device),
                     'attention_mask': pos_mask.to(train_device),
@@ -652,35 +640,109 @@ if __name__ == "__main__":
                     'input_ids': neg_ids.to(train_device),
                     'attention_mask': neg_mask.to(train_device),
                 })
-                a_ppl  = perplexity(anchor_inputs, a_perf_out)
-                a_xppl = entropy(a_obs_out, a_perf_out, anchor_inputs, pad_id)
-                p_ppl  = perplexity(positive_inputs, p_perf_out)
+                p_ppl = perplexity(positive_inputs, p_perf_out)
                 p_xppl = entropy(p_obs_out, p_perf_out, positive_inputs, pad_id)
-                n_ppl  = perplexity(negative_inputs, n_perf_out)
+                n_ppl = perplexity(negative_inputs, n_perf_out)
                 n_xppl = entropy(n_obs_out, n_perf_out, negative_inputs, pad_id)
+                # 计算 score = ppl / xppl
+                score_h = (p_ppl / p_xppl).item()  # 人类答案的分数
+                score_m = (n_ppl / n_xppl).item()  # 机器答案的分数
+                # 记录分数和标签（human=0, machine=1）
+                all_scores.append(score_h); all_labels.append(0)
+                all_scores.append(score_m); all_labels.append(1)
 
-                # Triplet 损失（单样本）
-                tl = F.triplet_margin_loss(
-                    a_ppl / a_xppl, p_ppl / p_xppl, n_ppl / n_xppl,
-                    margin=0.3, reduction='none'
-                )
-                triplet_losses.append(tl.item())
+        # 根据 score 找到最高 F1 的阈值
+        total = len(all_scores)
+        actual_positive = sum(all_labels)  # 实际机器答案数量 (label=1)
+        actual_negative = total - actual_positive  # 实际人类答案数量
+        # 将分数和标签按分数升序排序
+        sorted_indices = sorted(range(total), key=lambda k: all_scores[k])
+        sorted_scores = [all_scores[k] for k in sorted_indices]
+        sorted_labels = [all_labels[k] for k in sorted_indices]
+        # 前缀和（累计正类数量）
+        prefix_pos = []
+        running_pos = 0
+        for lbl in sorted_labels:
+            if lbl == 1:
+                running_pos += 1
+            prefix_pos.append(running_pos)
+        best_f1 = 0.0
+        best_thr = None
+        best_rule = None
 
-                # 域分类准确率
-                domain_input = torch.cat([
-                    (a_ppl / a_xppl).unsqueeze(-1),
-                    (p_ppl / p_xppl).unsqueeze(-1),
-                    (n_ppl / n_xppl).unsqueeze(-1),
-                ], dim=-1).to(train_device)
-                logits = domain_classifier(domain_input)
-                pred = logits.argmax(dim=-1)
-                dom_correct += int((pred == domain_label).sum().item())
-                dom_total += domain_label.numel()
+        # 情况1：score <= thr 判定为机器（正类）
+        # 考虑阈值低于最小值（无样本被预测为机器）的情况（F1=0，因为召回=0），可跳过因为不会是最佳
+        # 遍历每个唯一分数值作为阈值（包含该值）
+        i = 0
+        n_scores = total
+        while i < n_scores:
+            thr_val = sorted_scores[i]
+            # 找到值为 thr_val 的最后一个索引 j
+            j = i
+            while j + 1 < n_scores and math.isclose(sorted_scores[j+1], thr_val, rel_tol=1e-12, abs_tol=1e-12):
+                j += 1
+            # 预测为机器的数量（score <= thr_val 的样本数）
+            predicted_pos = j + 1
+            TP = prefix_pos[j]  # <= thr 的正类数
+            FP = predicted_pos - TP  # <= thr 的负类数
+            FN = actual_positive - TP  # 未预测出的正类数
+            precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+            recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thr = thr_val
+                best_rule = "<="
+            # 跳过相同分数的样本，直接到下一个不同分数
+            i = j + 1
 
-        print(f"[Eval] TripletLoss: {np.mean(triplet_losses):.4f} | Domain Acc: {dom_correct / max(dom_total,1):.4f}")
+        # 情况2：score >= thr 判定为机器（正类）
+        # 考虑阈值高于最大值（无样本被预测为机器）的情况（F1=0），可跳过
+        # 先考虑阈值低于最小值（所有样本均预测为机器）
+        if total > 0:
+            # 所有样本预测为机器
+            TP = actual_positive
+            FP = actual_negative
+            FN = 0
+            precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+            recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thr = sorted_scores[0]  # 阈值可取最小值（含义：score >= min 即全部预测为机器）
+                best_rule = ">="
+        # 遍历每个唯一分数值，考虑阈值略高于该值的情况（排除该值及以下）
+        i = 0
+        while i < n_scores:
+            thr_val = sorted_scores[i]
+            j = i
+            while j + 1 < n_scores and math.isclose(sorted_scores[j+1], thr_val, rel_tol=1e-12, abs_tol=1e-12):
+                j += 1
+            # 阈值设为刚高于 thr_val，则 <= thr_val 的样本都预测为人类， > thr_val 的预测为机器
+            predicted_pos = total - (j + 1)
+            TP = actual_positive - prefix_pos[j]  # > thr 的正类数 = 总正类 - <= thr 的正类数
+            FP = predicted_pos - TP  # > thr 的负类数
+            FN = prefix_pos[j]       # 未被预测出的正类 = <= thr 的正类数
+            precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+            recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+            if f1 > best_f1:
+                best_f1 = f1
+                # 对于 score >= thr 判定机器的情况，如果最佳阈值在某个值之上，
+                # 可将阈值设置为该值（分类时应使用 >= 判断，即包含该值以上为机器）。
+                best_thr = thr_val
+                best_rule = ">="
+            i = j + 1
+
+        # 打印训练集上最佳阈值和对应F1
+        if best_thr is not None:
+            print(f"[Train] Best F1 = {best_f1:.4f} at threshold {best_thr:.6f} (rule: 'score {best_rule} threshold -> machine')")
+        else:
+            print("[Train] No threshold found (no positive samples)")
+
 
     # 保存最终模型
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    torch.save(encoder.state_dict(), os.path.join(CHECKPOINT_DIR, "shared_encoder_adapter_jsonl.pth"))
-    torch.save(domain_classifier.state_dict(), os.path.join(CHECKPOINT_DIR, "domain_classifier_jsonl.pth"))
+    torch.save(encoder.state_dict(), os.path.join(CHECKPOINT_DIR, "shared_encoder_adapter_jsonl_" + eval_sources[0] + ".pth"))
+    torch.save(domain_classifier.state_dict(), os.path.join(CHECKPOINT_DIR, "domain_classifier_jsonl_" + eval_sources[0] + ".pth"))
     print("Done.")
