@@ -1,0 +1,9 @@
+Total samples: 500 (Human: 250, Machine: 250)
+Best threshold = 1.2738
+Accuracy = 97.60%
+Precision (machine) = 97.98%
+Recall (machine) = 97.20%
+F1-score (machine) = 97.59%
+Scatter plot saved to ./results/score_scatter_psychology.png
+AUROC = 0.9852
+Fixed threshold (1.263969): Precision = 94.94%, Recall = 97.60%, F1 = 96.25%, Accuracy = 96.20%

@@ -1,0 +1,9 @@
+Total samples: 500 (Human: 250, Machine: 250)
+Best threshold = 1.2878
+Accuracy = 91.00%
+Precision (machine) = 95.96%
+Recall (machine) = 85.60%
+F1-score (machine) = 90.49%
+Scatter plot saved to ./results/score_scatter_open_qa.png
+AUROC = 0.9171
+Fixed threshold (1.314003): Precision = 98.45%, Recall = 76.40%, F1 = 86.04%, Accuracy = 87.60%

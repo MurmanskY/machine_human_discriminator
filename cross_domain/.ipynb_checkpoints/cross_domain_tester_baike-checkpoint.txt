@@ -1,0 +1,9 @@
+Total samples: 500 (Human: 250, Machine: 250)
+Best threshold = 2.1759
+Accuracy = 85.20%
+Precision (machine) = 83.08%
+Recall (machine) = 88.40%
+F1-score (machine) = 85.66%
+Scatter plot saved to ./results/score_scatter_biake.png
+AUROC = 0.9164
+Fixed threshold (2.074898): Precision = 74.06%, Recall = 94.80%, F1 = 83.16%, Accuracy = 80.80%

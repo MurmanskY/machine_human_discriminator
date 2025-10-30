@@ -1,0 +1,7 @@
+python cross_domain_tester_open_qa.py > cross_domain_tester_open_qa.txt
+python cross_domain_tester_baike.py > cross_domain_tester_baike.txt
+python cross_domain_tester_nlpcc_dbpa.py > cross_domain_tester_nlpcc_dbpa.txt
+python cross_domain_tester_medicine.py > cross_domain_tester_medicine.txt
+python cross_domain_tester_finance.py > cross_domain_tester_finance.txt
+python cross_domain_tester_psychology.py > cross_domain_tester_psychology.txt
+python cross_domain_tester_law.py > cross_domain_tester_law.txt

@@ -1,0 +1,24 @@
+Total samples: 500 (Human: 250, Machine: 250)
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Warning: empty input for text: 
+Best threshold = 1.2017
+Accuracy = 49.79%
+Precision (machine) = 49.79%
+Recall (machine) = 100.00%
+F1-score (machine) = 66.48%
+Warning: scores length = 486, true_labels length = 500
+Scatter plot saved to ./results/score_scatter_nlpcc_dbqa.png
+AUROC = 0.5289
+Fixed threshold (1.96464): Precision = 50.64%, Recall = 32.64%, F1 = 39.70%, Accuracy = 50.62%
